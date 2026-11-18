@@ -1,0 +1,138 @@
+  ---
+title: "Final Project"
+author: "Alexandre Snyder, Kunal Gosh, Seokyoung Kim"
+output: html_document
+self-contained: true
+---
+
+## Libraries and data load
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(glmnet)
+library(ranger)
+library(tidyclust)
+library(cluster)
+library(readxl)
+```
+
+```{r}
+final_raw <- read_csv("data/gapminder_final_F26.csv")
+```
+
+We study GDP per person (`gdp`) as the regression response and the four-category
+world region (`world_4region`) as the classification response. We use the
+remaining measurements as candidate predictors, apart from identifiers and
+the exclusions explained below.
+
+## Exploratory data analysis (EDA) part 1
+
+### Checking for missing data
+
+```{r}
+countries <- final_raw |>
+  filter(!is.na(population)) |>
+  mutate(across(c(world_4region, landlocked, democracy, female_hos,
+                  freedom_status, income_level, sexual_harassment), as.factor))
+countries
+```
+
+The file has 273 geographic records, but 79 lack population and nearly all
+other substantive measurements including territories and historical
+entities. So we restrict the analysis to the 194 countries with population
+data.
+
+```{r}
+missing_data <- final_raw |>
+  summarise(across(everything(), ~ sum(is.na(.x)))) |>
+  pivot_longer(everything(), names_to = "Variable", values_to = "Raw_missing") |>
+  left_join(countries |>
+    summarise(across(everything(), ~ sum(is.na(.x)))) |>
+    pivot_longer(everything(), names_to = "Variable",
+                 values_to = "Country_missing"), by = "Variable") |>
+  arrange(desc(Country_missing))
+missing_data
+```
+
+Disregarding those 79 countries that have no records, energy use has 153 missing
+values, and disaster deaths have 94. These are the clearest candidates for
+removal before modeling.
+
+### Units of variables
+
+```{r}
+variable_dictionary <- read_excel("data/Gapminder_Var_Dict_F26.xlsx") |>
+  # Match variable names with the data we have
+  mutate(Variable = recode(Variable, cell_phone = "cell_phones",
+    corruption = "corruption_index", education = "education_index",
+    electriciy_access = "electricity_access", sanitation_pct = "basic_sanitation"))
+variable_dictionary
+```
+
+The table gives the supplied definitions and measurement years. GDP, CO2,
+health spending, and alcohol are already per person; cell phones are per 100
+people. Child mortality is per 1,000 live births, maternal mortality per 100,000
+live births, and the murder, traffic, and suicide rates per 100,000 people.
+Natural-disaster deaths are a total count, so we convert them to deaths per
+100,000 residents.
+
+```{r}
+countries <- countries |>
+  mutate(natural_disaster_rate = 100000 * natural_disaster_deaths / population)
+```
+
+### Logging variables
+
+```{r}
+#| fig-width: 10
+#| fig-height: 24
+countries |>
+  # Exclude categorical variables
+  select(-c(geo, name, world_4region, landlocked, democracy, female_hos,
+            freedom_status, income_level, sexual_harassment)) |>
+  pivot_longer(everything(), names_to = "Variable", values_to = "Value") |>
+  ggplot(aes(x = Value)) + geom_histogram(bins = 20) +
+  facet_wrap(~ Variable, scales = "free", ncol = 2) +
+  labs(x = "Original value", y = "Countries")
+```
+
+We use log10 transformations for those variables that have long upper tails.
+This reduces the influence of very large values and gives more space to
+differences among lower values.
+
+```{r}
+log_variables <- c("cell_phones", "child_mortality", "co2_per_capita", 
+  "daily_income", "gdp", "health_spending_per_person", "maternal_mortality",
+  "murder_rate", "natural_disaster_rate", "population", "poverty_rate",
+  "traffic_deaths")
+final_logged <- countries |>
+  mutate(across(all_of(log_variables), log10))
+```
+
+```{r}
+final_logged |>
+  select(gdp, population, daily_income, co2_per_capita, child_mortality,
+         health_spending_per_person, maternal_mortality, natural_disaster_rate) |>
+  pivot_longer(everything(), names_to = "Variable", values_to = "Value") |>
+  ggplot(aes(x = Value)) + geom_histogram(bins = 20) +
+  facet_wrap(~ Variable, scales = "free", ncol = 2) +
+  labs(x = "log10 value", y = "Countries")
+```
+
+## CV or testing/training for overfitting
+
+```{r}
+model_data <- final_logged |>
+  select(-geo, -name, -energy_use_per_person, -natural_disaster_rate)
+set.seed(2026)
+final_split <- initial_split(model_data, prop = 0.8, strata = world_4region)
+final_train <- training(final_split)
+final_test <- testing(final_split)
+tibble(Set = c("Training", "Testing"), Countries = c(nrow(final_train), nrow(final_test)))
+```
+
+We reserve about 20% of countries for testing and stratify by region to keep
+all four regions represented. Country name, country code, and the two columns
+above 40% missing are now excluded.
+We plan to use 5 fold CV within training to choose tuning parameters.
