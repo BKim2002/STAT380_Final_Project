@@ -136,3 +136,197 @@ We reserve about 20% of countries for testing and stratify by region to keep
 all four regions represented. Country name, country code, and the two columns
 above 40% missing are now excluded.
 We plan to use 5 fold CV within training to choose tuning parameters.
+
+## Regression model
+
+### Which method are you using?
+
+### Missing values drop
+
+### Making model
+
+### Which variables
+
+### Check for overfitting
+
+### Evaluate model quality
+
+## Classification model
+
+### Which method are you using?
+
+### Missing values drop
+
+### Making model
+
+### Which variables
+
+### Check for overfitting
+
+### Evaluate model quality
+
+## Variable selection comparison
+
+## Clustering and PCA
+
+### Which clustering method are you using? Which variable will you compare?
+
+We use k-means and withhold world region until after choosing the number of
+clusters.
+
+### Missing values drop
+
+```{r}
+cluster_rows <- final_logged |>
+  select(-geo, -energy_use_per_person,
+         -natural_disaster_rate, -natural_disaster_deaths,
+         -landlocked, -democracy, -female_hos,
+         -freedom_status, -income_level, -sexual_harassment) |>
+  drop_na()
+
+cluster_data <- cluster_rows |>
+  select(-name, -world_4region)
+
+cluster_recipe <- recipe(~ ., data = cluster_data) |>
+  step_normalize(all_numeric_predictors())
+```
+
+The same two high-missingness variables - energy use and disaster deaths - are
+excluded.
+
+### Will you use categorical variables in your clusters?
+
+We exclude all categorical variables, including region, from k-means and
+PCA. Dummy coding is possible, but Euclidean distances would depend on how
+many columns represent each category and on their frequencies. Using the
+quantitative measurements keeps the distance definition simpler.
+
+### Making clusters
+
+```{r}
+kmeans_spec <- k_means(num_clusters = tune()) |> set_engine("stats")
+kmeans_workflow <- workflow() |>
+  add_recipe(cluster_recipe) |>
+  add_model(kmeans_spec)
+cluster_grid <- tibble(num_clusters = 2:9)
+full_data_resample <- rsample::apparent(cluster_data)
+set.seed(2026)
+kmeans_tuned <- tune_cluster(kmeans_workflow, resamples = full_data_resample,
+  grid = cluster_grid, metrics = cluster_metric_set(sse_within_total))
+cluster_quality <- collect_metrics(kmeans_tuned, summarize = FALSE)
+cluster_quality
+```
+
+### Cluster quality
+
+```{r}
+best_k <- 3
+set.seed(2026)
+cluster_fit <- kmeans_workflow |>
+  finalize_workflow(tibble(num_clusters = best_k)) |>
+  fit(data = cluster_data)
+best_k
+glance(cluster_fit)
+tidy(cluster_fit)
+```
+
+### Check against hold out categorical variable
+
+```{r}
+cluster_results <- augment(cluster_fit, new_data = cluster_rows)
+cluster_region <- cluster_results |> count(.pred_cluster, world_4region) |>
+  group_by(.pred_cluster) |> mutate(Proportion = n / sum(n)) |> ungroup()
+cluster_region
+cluster_results |>
+  ggplot(aes(x = world_4region, fill = .pred_cluster)) + geom_bar(position = "fill") +
+  labs(x = "World region", y = "Proportion within region", fill = "Cluster")
+tibble(Adjusted_Rand = mclust::adjustedRandIndex(cluster_results$.pred_cluster,
+                                               cluster_results$world_4region))
+```
+
+Cluster 1 contains 46 African countries, 18 Asian countries, and four from
+the Americas. Cluster 2 includes all 48 European countries but also 39
+Asian, 31 American, and eight African countries. The adjusted Rand index
+is 0.201, indicating limited agreement with the four geographic groups.
+The grouping therefore captures a different structure from region labels.
+
+### PCA
+
+```{r}
+pca_recipe <- cluster_recipe |>
+  step_pca(all_predictors())
+pca_prep <- prep(pca_recipe)
+pca_scores <- bake(pca_prep, new_data = cluster_data)
+pca_variance <- tidy(pca_prep, 2, type = "variance") |>
+  filter(terms == "percent variance") |>
+  mutate(Cumulative = cumsum(value))
+```
+
+PCA uses the same imputed and standardized quantitative matrix as k-means.
+
+### Which components?
+
+```{r}
+pca_variance |> filter(terms == "percent variance")
+pca_variance |> filter(terms == "cumulative percent variance")
+pca_variance |>
+  filter(terms == "percent variance") |>
+  ggplot(aes(x = component, y = value)) + geom_col() + geom_line() + geom_point() +
+  labs(x = "PCA component", y = "Variation explained (%)")
+```
+
+PC1 explains 61.7% of standardized variation and PC2 another 7.6%,
+giving about 69.3% together. Four components reach about 79.0%, while
+five reach 82.5%.
+
+### Loading/biplot
+
+```{r}
+pca_loadings <- tidy(pca_prep, 2)
+pca_loadings |>
+  mutate(component = fct_inorder(component)) |>
+  filter(component == "PC1" | component == "PC2") |>
+  ggplot(aes(x = value, y = terms, fill = terms)) +
+  geom_col(show.legend = FALSE) + facet_wrap(~ component) +
+  labs(x = "Loading", y = NULL) + theme(axis.text = element_text(size = 9))
+```
+
+These are the loading bars for the first two components. Variables with the same
+sign on a component move together in thatm direction; opposite signs describe
+opposing profiles.
+
+PC1 contrasts higher HDI, GDP, daily income, and health spending on its
+negative side with higher child mortality on its positive side. It
+largely represents a development gradient. PC2 has positive loadings for
+labor-force participation, alcohol, suicide, and the corruption index,
+and a negative loading for electricity access.
+
+### Compare to clusters
+
+```{r}
+pca_display <- pca_scores |>
+  bind_cols(
+    cluster_results |> select(.pred_cluster, world_4region)
+  )
+pca_display |>
+  ggplot(aes(x = PC1, y = PC2,
+             color = .pred_cluster, shape = world_4region)) +
+  geom_point() +
+  labs(x = "Component 1", y = "Component 2", color = "Cluster")
+```
+
+Colors show the selected k-means clusters and shapes show the withheld
+regions. Overlap of regions inside clusters would mean that similarity in
+these quantitative profiles is not equivalent to geographic membership.
+The cluster colors separate mainly along the development gradient on PC1,
+while region shapes overlap.
+
+## Your Question
+
+## Additional EDA
+
+### Additional EDA for regression
+
+### Other additional EDA (optional)
+
+## Conclusions and unanswered questions
